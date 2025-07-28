@@ -1,1 +1,3 @@
-#Solana Meme Scanner
+# Solana Meme Scanner
+
+Basic starter project for deployment.
