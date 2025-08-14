@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Solana Meme Scanner – V1 (Takeover & Revival)</title>
+  <style>
+    :root { --bg:#0b0e13; --panel:#0f131a; --muted:#8ea0b5; --border:#1c2533; --text:#e7ecf2; --good:#7dffa0; --bad:#ff7d7d; --warn:#ffd37d; }
+    *{box-sizing:border-box} body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,sans-serif;background:var(--bg);color:var(--text)}
+    header{position:sticky;top:0;background:var(--panel);border-bottom:1px solid var(--border);padding:12px 16px;z-index:10}
+    .wrap{max-width:1200px;margin:0 auto}
+    .tabs{display:flex;gap:8px;margin-top:8px}
+    .tab{padding:8px 12px;border:1px solid var(--border);border-radius:999px;background:#0c1118;color:var(--text);cursor:pointer}
+    .tab.active{outline:2px solid #2b6cff}
+    .controls{display:grid;grid-template-columns:repeat(8,minmax(120px,1fr));gap:8px;margin-top:12px}
+    .controls label{font-size:12px;color:var(--muted)}
+    input,select{width:100%;background:#0c1118;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px}
+    .grid{display:grid;grid-template-columns:1fr;gap:8px;padding:12px 0}
+    .card{display:grid;grid-template-columns: 1.2fr repeat(7,1fr) auto;gap:8px;align-items:center;background:#111824;border:1px solid var(--border);border-radius:10px;padding:10px}
+    .pill{font-size:12px;padding:2px 8px;border:1px solid #2a3649;border-radius:999px}
+    .badge{font-size:11px;border:1px solid #32425a;border-radius:6px;padding:2px 6px}
+    .muted{color:var(--muted)}
+    .error{color:var(--bad);padding:12px;white-space:pre-wrap}
+    .ampel{font-weight:700} .ampel.green{color:var(--good)} .ampel.yellow{color:var(--warn)} .ampel.red{color:var(--bad)}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap">
+      <h1>Solana Meme Scanner – V1</h1>
+      <div class="tabs">
+        <button class="tab active" data-mode="takeover">Community Takeover</button>
+        <button class="tab" data-mode="revival">Revival</button>
+        <div class="muted" style="margin-left:auto">Letztes Update: <span id="last-upd">–</span></div>
+      </div>
+      <div class="controls">
+        <label>Refresh (Sek.)<br/><input id="f-interval" type="number" value="15" min="5"/></label>
+        <label>Limit Rows<br/><input id="f-limit" type="number" value="150" min="10"/></label>
+        <label>Min LP (USD)<br/><input id="f-liq" type="number" value="5000"/></label>
+        <label>Min Vol 5m (USD)<br/><input id="f-v5" type="number" value="1000"/></label>
+        <label>Max Δ 5m (%)<br/><input id="f-pc5max" type="number" value="120"/></label>
+        <label>Max FDV (USD)<br/><input id="f-fdv-max" type="number" value="500000"/></label>
+        <label>Min BuyRatio h1<br/><input id="f-br1" type="number" step="0.01" value="0.60"/></label>
+        <label>Min Δ h1 (%)<br/><input id="f-pc1" type="number" value="40"/></label>
+        <label>Min Δ 5m (%)<br/><input id="f-pc5" type="number" value="8"/></label>
+        <label>Min Alter (Tage) (Revival)<br/><input id="f-age-days" type="number" value="7"/></label>
+        <label>Max Δ 24h (%) (Revival)<br/><input id="f-pc24max" type="number" value="5"/></label>
+        <label>Min AccVol (x) (Revival)<br/><input id="f-acc" type="number" step="0.1" value="3.0"/></label>
+        <label>API Quelle<br/>
+          <select id="f-source">
+            <option value="direct">DexScreener direkt</option>
+            <option value="proxy">Cloudflare Worker Proxy (/api/pairs)</option>
+          </select>
+        </label>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div id="list" class="grid"></div>
+    <div id="err" class="error" style="display:none"></div>
+  </main>
+
+  <script>
+  const state = { mode:'takeover' };
+  const elList=document.getElementById('list'), elErr=document.getElementById('err'), elUpd=document.getElementById('last-upd');
+  const F = {
+    interval: q('#f-interval'), limit: q('#f-limit'), liq:q('#f-liq'), v5:q('#f-v5'), pc5max:q('#f-pc5max'),
+    fdvMax:q('#f-fdv-max'), br1:q('#f-br1'), pc1:q('#f-pc1'), pc5:q('#f-pc5'),
+    ageDays:q('#f-age-days'), pc24max:q('#f-pc24max'), acc:q('#f-acc'), source:q('#f-source')
+  };
+  function q(s){return document.querySelector(s)}
+  function on(el,ev,fn){el.addEventListener(ev,fn)}
+  document.querySelectorAll('.tab').forEach(b=>on(b,'click',()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active')); b.classList.add('active'); state.mode=b.dataset.mode; refresh(); }));
+  Object.values(F).forEach(el=> on(el,'change',()=>{ if(el===F.interval) start(); else refresh(); }));
+  const clamp01=x=>Math.max(0,Math.min(1,x)), nz=(x,d=0)=>(x==null||isNaN(x)?d:Number(x)), fmt=(n,d=0)=> (n==null||isNaN(n)?'–':Number(n).toLocaleString(undefined,{maximumFractionDigits:d,minimumFractionDigits:d}));
+
+  async function fetchPairs(){
+    const direct='https://api.dexscreener.com/latest/dex/pairs/solana';
+    const proxy='/api/pairs';
+    const url = (F.source.value==='proxy') ? proxy : direct;
+    const res = await fetch(url, { cache:'no-store', mode:'cors', headers:{'accept':'application/json'} });
+    if(!res.ok){
+      const text = await res.text().catch(()=>'');
+      throw new Error(`Fetch ${url} → ${res.status} ${res.statusText}\n${text.slice(0,300)}`);
+    }
+    const data = await res.json();
+    if(!data || !data.pairs) throw new Error('API Response ohne .pairs');
+    return data.pairs;
+  }
+
+  function enrich(p){
+    const b5=nz(p.txns?.m5?.buys), s5=nz(p.txns?.m5?.sells);
+    const b1=nz(p.txns?.h1?.buys), s1=nz(p.txns?.h1?.sells);
+    const v5=nz(p.volume?.m5), v1=nz(p.volume?.h1), v24=nz(p.volume?.h24);
+    const pc5=nz(p.priceChange?.m5), pc1=nz(p.priceChange?.h1), pc24=nz(p.priceChange?.h24);
+    const liq=nz(p.liquidity?.usd), fdv=nz(p.fdv);
+    const now=Date.now(), age=p.pairCreatedAt?Math.floor((now-p.pairCreatedAt)/60000):null;
+    const buy5=(b5+s5)?b5/(b5+s5):0.5, buy1=(b1+s1)?b1/(b1+s1):0.5;
+    const net1=b1-s1, accVol=v24>0?(v1*24)/v24:0, liqToFDV=fdv>0?liq/fdv:0;
+    return Object.assign(p,{_b5:b5,_s5:s5,_b1:b1,_s1:s1,_v5:v5,_v1:v1,_v24:v24,_pc5:pc5,_pc1:pc1,_pc24:pc24,_liq:liq,_fdv:fdv,_age:age,_buy5:buy5,_buy1:buy1,_net1:net1,_accVol:accVol,_liqToFDV:liqToFDV});
+  }
+
+  function passTakeover(p){
+    const liqToFDVMin=0.008;
+    return p._age!=null && p._age>=60 && p._age<=4320 &&
+      p._fdv>=50000 && p._fdv<= Number(F.fdvMax.value||500000) &&
+      p._liq>= Number(F.liq.value||5000) && p._liqToFDV>= liqToFDVMin &&
+      p._pc1>= Number(F.pc1.value||40) && p._pc5>= Number(F.pc5.value||8) &&
+      p._buy1>= Number(F.br1.value||0.60) && p._buy5>= 0.55 &&
+      p._b1>=25 && p._accVol>=2.5 &&
+      p._pc5<= Number(F.pc5max.value||120) && (p._v5>= Number(F.v5.value||1000) || p._b5>=8);
+  }
+  function passRevival(p){
+    const minAgeMin=(Number(F.ageDays.value||7))*24*60;
+    return p._age!=null && p._age>=minAgeMin &&
+      p._pc1>=15 && p._pc24<= Number(F.pc24max.value||5) &&
+      p._accVol>= Number(F.acc.value||3) &&
+      p._buy5>= (p._buy1 + 0.05) &&
+      p._liq>= Math.max(10000, Number(F.liq.value||5000)) && p._liqToFDV>=0.005 &&
+      p._fdv<=10000000 &&
+      p._pc5<= Number(F.pc5max.value||120) && (p._v5>= Number(F.v5.value||1000) || p._b5>=8);
+  }
+
+  function scoreTakeover(p){
+    const sMomentum=0.6*clamp01(p._pc1/60)+0.4*clamp01(p._pc5/12);
+    const sBuy=0.6*clamp01((p._buy1-0.5)*2)+0.4*clamp01((p._buy5-0.5)*2);
+    const sNet=clamp01(p._net1/20);
+    const sAcc=0.6*clamp01(Math.log2(Math.max(1,p._accVol))/2)+0.4*clamp01(p._v1/100000);
+    const sLP=0.7*clamp01(p._liq/50000)+0.3*clamp01(p._liqToFDV/0.02);
+    return Math.round(100*((0.35)*(0.7*sMomentum+0.3*sNet)+(0.35)*(sBuy)+(0.20)*(sAcc)+(0.10)*(sLP)));
+  }
+  function scoreRevival(p){
+    const sTurn=0.7*clamp01(p._pc1/25)+0.3*(p._pc24<=0?1:clamp01((5-p._pc24)/5));
+    const sFlow=0.6*clamp01(Math.log2(Math.max(1,p._accVol))/2)+0.4*clamp01((p._buy5-p._buy1+0.1)/0.3);
+    const sStab=0.6*clamp01(p._liq/60000)+0.4*clamp01(p._liqToFDV/0.02);
+    const sPart=0.6*clamp01(p._b1/60)+0.4*clamp01((p._net1)/25);
+    return Math.round(100*((0.35)*sTurn+(0.35)*sFlow+(0.15)*sStab+(0.15)*sPart));
+  }
+  function scorePairs(pairs,mode){
+    const list=(pairs||[]).map(enrich).filter(mode==='takeover'?passTakeover:passRevival).map(p=>{p._score=mode==='takeover'?scoreTakeover(p):scoreRevival(p);return p;}).sort((a,b)=>b._score-a._score);
+    return list.slice(0, Number(F.limit.value||150));
+  }
+  function ampel(s){ return s>=75?'<span class="ampel green">🟢</span>':(s>=55?'<span class="ampel yellow">🟡</span>':'<span class="ampel red">🔴</span>'); }
+  function render(rows){
+    elList.innerHTML='';
+    if(!rows.length){ const d=document.createElement('div'); d.className='muted'; d.style.padding='16px'; d.textContent='Keine Treffer mit den aktuellen Filtern.'; elList.appendChild(d); return; }
+    rows.forEach(p=>{
+      const age=(p._age==null)?'–':(p._age<60?`${p._age}m`:`${Math.floor(p._age/60)}h`);
+      const buyTxt=`${Math.round(p._buy1*100)}/${Math.round(p._buy5*100)}`;
+      const div=document.createElement('div'); div.className='card';
+      div.innerHTML=`
+        <div><span class="pill">${p.baseToken?.symbol||'?'}</span> <span class="muted">/ ${p.quoteToken?.symbol||''}</span> <span class="badge">Age ${age}</span> <span class="badge">FDV $${fmt(p._fdv,0)}</span> <span class="badge">LP $${fmt(p._liq,0)}</span> <span class="badge">AccVol ×${fmt(p._accVol,2)}</span></div>
+        <div><b>${ampel(p._score)} ${p._score}</b></div>
+        <div>Δ 5m <b>${fmt(p._pc5,2)}%</b></div>
+        <div>Δ 1h <b>${fmt(p._pc1,2)}%</b></div>
+        <div>Vol 5m <b>$${fmt(p._v5,0)}</b></div>
+        <div>Vol 1h <b>$${fmt(p._v1,0)}</b></div>
+        <div>Buys/Sells 1h <b>${p._b1}/${p._s1}</b></div>
+        <div>Buy% 1h/5m <b>${buyTxt}</b></div>
+        <div><a href="${p.url}" target="_blank" rel="noopener">Dexscreener ↗</a></div>`;
+      elList.appendChild(div);
+    });
+  }
+
+  async function refresh(){
+    try{
+      elErr.style.display='none'; elErr.textContent='';
+      const pairs=await fetchPairs();
+      const rows=scorePairs(pairs, state.mode);
+      render(rows);
+      elUpd.textContent=new Date().toLocaleTimeString();
+    }catch(e){
+      elErr.style.display='block';
+      elErr.textContent = String(e && e.message ? e.message : e);
+    }
+  }
+  let timer;
+  function start(){ clearInterval(timer); const sec=Math.max(5, Number(F.interval.value||15)); refresh(); timer=setInterval(refresh, sec*1000); }
+  start();
+  </script>
+</body>
+</html>
