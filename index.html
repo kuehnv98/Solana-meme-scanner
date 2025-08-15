@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solana Meme Scanner – Live Filter</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#0b0e13; color:#e7ecf2; margin:0 }
+  header { position:sticky; top:0; background:#0f131a; border-bottom:1px solid #1c2533; padding:12px 16px }
+  .wrap { max-width:1100px; margin:0 auto }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:center }
+  .slider-group { display:flex; flex-direction:column; font-size:13px; }
+  input[type=range] { width:150px }
+  .pill { border:1px solid #2a3649; border-radius:999px; padding:4px 10px; font-size:13px }
+  .grid { display:grid; gap:8px; padding:12px 0 }
+  .card { display:grid; grid-template-columns:1fr repeat(4, 120px); gap:8px; align-items:center; background:#111824; border:1px solid #1c2533; border-radius:10px; padding:10px }
+  .muted { color:#8ea0b5 }
+  a { color:#7db2ff }
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <h1 style="margin:0 0 6px 0">Solana Meme Scanner – Live Filter</h1>
+    <div class="row">
+      <span class="pill" id="apiStatus">API: –</span>
+      <span class="pill" id="counts">Pairs: –</span>
+      <div class="slider-group">
+        <label>LP min: <span id="lpVal">5000</span></label>
+        <input type="range" id="lp" min="0" max="20000" step="500" value="5000">
+      </div>
+      <div class="slider-group">
+        <label>Pump 1h % min: <span id="pumpVal">50</span></label>
+        <input type="range" id="pump" min="0" max="200" step="5" value="50">
+      </div>
+      <div class="slider-group">
+        <label>Buy-Ratio min %: <span id="buyVal">60</span></label>
+        <input type="range" id="buy" min="0" max="100" step="5" value="60">
+      </div>
+      <div class="slider-group">
+        <label>Vol 5m min: <span id="volVal">20000</span></label>
+        <input type="range" id="vol" min="0" max="100000" step="1000" value="20000">
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div id="list" class="grid"></div>
+</main>
+
+<script>
+const WORKER_URL = "https://icy-bush-6d1c.kuehn-v2020.workers.dev/";
+let st = { liqMin: 5000, pump1h: 50, buyRatio: 0.6, vol5m: 20000 };
+
+document.querySelectorAll('input[type=range]').forEach(slider => {
+  slider.addEventListener('input', e => {
+    const id = e.target.id;
+    const val = Number(e.target.value);
+    if (id === 'lp') { st.liqMin = val; document.getElementById('lpVal').textContent = val; }
+    if (id === 'pump') { st.pump1h = val; document.getElementById('pumpVal').textContent = val; }
+    if (id === 'buy') { st.buyRatio = val/100; document.getElementById('buyVal').textContent = val; }
+    if (id === 'vol') { st.vol5m = val; document.getElementById('volVal').textContent = val; }
+    renderFiltered();
+  });
+});
+
+let lastData = [];
+
+async function fetchData() {
+  const res = await fetch(WORKER_URL, { headers: { accept: 'application/json' }, cache: 'no-store' });
+  if (!res.ok) throw new Error(res.statusText);
+  const json = await res.json();
+  lastData = json.pairs.filter(p => p.chainId === 'solana').map(enrich);
+  document.getElementById('apiStatus').textContent = "API OK";
+  document.getElementById('counts').textContent = `Pairs: ${json.pairs.length} | solana ${lastData.length}`;
+  renderFiltered();
+}
+
+function enrich(p) {
+  const nz = (x,d=0)=> (x==null||isNaN(x)?d:Number(x));
+  const b5=nz(p.txns?.m5?.buys), s5=nz(p.txns?.m5?.sells);
+  const b1=nz(p.txns?.h1?.buys), s1=nz(p.txns?.h1?.sells);
+  const v5=nz(p.volume?.m5), v1=nz(p.volume?.h1), v24=nz(p.volume?.h24);
+  const pc5=nz(p.priceChange?.m5), pc1=nz(p.priceChange?.h1);
+  const liq=nz(p.liquidity?.usd);
+  const buy1=(b1+s1)?b1/(b1+s1):0.5;
+  return Object.assign(p, { _b5:b5,_s5:s5,_b1:b1,_s1:s1,_v5:v5,_v1:v1,_v24:v24,_pc5:pc5,_pc1:pc1,_liq:liq,_buy1:buy1 });
+}
+
+function passFilter(p) {
+  return p._liq >= st.liqMin && p._pc1 >= st.pump1h && p._buy1 >= st.buyRatio && p._v5 >= st.vol5m;
+}
+
+function renderFiltered() {
+  const rows = lastData.filter(passFilter);
+  const elList = document.getElementById('list');
+  elList.innerHTML = '';
+  if (!rows.length) { elList.innerHTML = '<div class="muted">Keine Treffer</div>'; return; }
+  rows.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'card';
+    div.innerHTML = `
+      <div><b>${p.baseToken?.symbol||'?'} / ${p.quoteToken?.symbol||''}</b><br><a href="${p.url}" target="_blank">Dexscreener ↗</a></div>
+      <div>Δ 5m <b>${p._pc5.toFixed(2)}%</b></div>
+      <div>Δ 1h <b>${p._pc1.toFixed(2)}%</b></div>
+      <div>Vol 5m <b>$${p._v5.toLocaleString()}</b></div>
+      <div>LP <b>$${p._liq.toLocaleString()}</b></div>`;
+    elList.appendChild(div);
+  });
+}
+
+fetchData();
+setInterval(fetchData, 15000);
+</script>
+</body>
+</html>
