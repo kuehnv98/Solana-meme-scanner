@@ -1,0 +1,32 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Solana Meme Scanner - Easy Filter Test</title>
+<script>
+const WORKER_URL = "https://icy-bush-6d1c.kuehn-v2020.workers.dev/";
+
+async function loadData() {
+  const statusEl = document.getElementById("status");
+  try {
+    const t0 = performance.now();
+    const resp = await fetch(WORKER_URL);
+    const t1 = performance.now();
+    if (!resp.ok) throw new Error(resp.status + " " + resp.statusText);
+    const data = await resp.json();
+    const latency = Math.round(t1 - t0);
+    statusEl.textContent = `API OK (${latency}ms) - Pairs erhalten: ${data.pairs?.length || 0}`;
+    document.getElementById("output").textContent = JSON.stringify(data, null, 2);
+  } catch (e) {
+    statusEl.textContent = "Fehler: " + e.message;
+  }
+}
+</script>
+</head>
+<body onload="loadData()">
+<h1>Solana Meme Scanner - Easy Filter Test</h1>
+<div id="status">Lade...</div>
+<pre id="output"></pre>
+</body>
+</html>
